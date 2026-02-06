@@ -4,7 +4,8 @@
 
 // Setup type definitions for built-in Supabase Runtime APIs
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { fetchLatestXauUsdPrice } from "./get-data.ts";
+import { fetchLatestXauUsdPrice } from "./get-goldprice.ts";
+import { fetchStockQuotes } from "./get-stockprice.ts";
 import sendLinePushMessage from "./line-message.ts";
 
 const getRequiredEnv = (key: string): string => {
@@ -22,6 +23,52 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+const percentFormatter = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+const formatSignedCurrency = (value: number): string => {
+  const formatted = currencyFormatter.format(Math.abs(value));
+  if (value > 0) {
+    return `+${formatted}`;
+  }
+  if (value < 0) {
+    return `-${formatted}`;
+  }
+  return formatted;
+};
+
+const formatSignedPercent = (value: number): string => {
+  const formatted = percentFormatter.format(Math.abs(value));
+  if (value > 0) {
+    return `+${formatted}%`;
+  }
+  if (value < 0) {
+    return `-${formatted}%`;
+  }
+  return `${formatted}%`;
+};
+
+const formatGmt7HourStamp = (): string => {
+  const now = new Date();
+
+  const datePart = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(now);
+
+  const hourPart = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok",
+    hour: "2-digit",
+    hour12: false,
+  }).format(now);
+
+  return `${datePart} ${hourPart}:00`;
+};
+
 
 Deno.serve(async () => {
   try {
@@ -34,21 +81,86 @@ Deno.serve(async () => {
     const recipientId = getRequiredEnv("LINE_RECIPIENT_ID");
 
     const xauPrice = await fetchLatestXauUsdPrice();
+    const stockQuotes = await fetchStockQuotes(
+      getRequiredEnv("ALPHA_VANTAGE_API_KEY"),
+    );
 
     const priceText = currencyFormatter.format(xauPrice.price);
+    const stockLines = stockQuotes.map((quote) => {
+      const lastPrice = currencyFormatter.format(quote.close);
+      // const changeText = formatSignedCurrency(quote.change);
+      // const changePercentText = formatSignedPercent(quote.changePercent);
+      return `${quote.symbol}: ${lastPrice}`;
+    });
 
-    const messageLines = [
-      "XAU/USD spot update",
-      `Price: ${priceText}`,
+    const altText = [
+      formatGmt7HourStamp(),
+      `XAU: ${priceText}`,
+      ...stockLines,
+    ].join(" | ");
 
+    const flexBodyContents: Array<Record<string, unknown>> = [
+      {
+        type: "text",
+        text: formatGmt7HourStamp(),
+        size: "sm",
+        color: "#888888",
+        margin: "sm",
+      },
+      {
+        type: "separator",
+        margin: "md",
+      },
+      {
+        type: "text",
+        text: `XAU: ${priceText}`,
+        weight: "bold",
+        size: "md",
+        margin: "md",
+      },
     ];
+
+    if (stockLines.length > 0) {
+      flexBodyContents.push(
+        {
+          type: "separator",
+          margin: "md",
+        },
+        {
+          type: "text",
+          text: "Stocks",
+          weight: "bold",
+          size: "sm",
+          margin: "md",
+        },
+        ...stockLines.map((line) => ({
+          type: "text",
+          text: line,
+          size: "sm",
+          wrap: true,
+          margin: "sm",
+        })),
+      );
+    }
+
+    const flexMessage: Record<string, unknown> = {
+      type: "flex",
+      altText,
+      contents: {
+        type: "bubble",
+        body: {
+          type: "box",
+          layout: "vertical",
+          contents: flexBodyContents,
+        },
+      },
+    };
 
     const lineResponse = await sendLinePushMessage({
       channelAccessToken,
       to: recipientId,
       messages: [{
-        type: "text",
-        text: messageLines.join("\n"),
+        ...flexMessage,
       }],
       notificationDisabled: true,
     });
